@@ -6,6 +6,7 @@ import logging
 import os
 import os.path
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -478,6 +479,7 @@ class Worker(ServiceCommandSection):
         # None - not initialized
         # str - not supported, version string indicates last server version
         self._runtime_props_support = None
+        self._available_gpu_indexes = None
 
     @classmethod
     def _verify_command_states(cls, kwargs):
@@ -618,13 +620,13 @@ class Worker(ServiceCommandSection):
             self.send_logs(task_id=task_id, lines=['Executing: {}\n'.format(full_docker_cmd)], level="INFO")
 
             cmd = Argv(*full_docker_cmd)
-            print('Running Docker:\n{}\n'.format(str(cmd)))
         else:
             cmd = worker_args.get_argv_for_command("execute") + (
                 '--full-monitoring' if self._services_mode else '--disable-monitoring',
                 "--id",
                 task_id,
             )
+        print('Running Docker:\n{}\n'.format(str(cmd)))
 
         events_service = self.get_service(Events)
         stop_signal = TaskStopSignal(
@@ -926,6 +928,8 @@ class Worker(ServiceCommandSection):
         return queue_tags, runtime_props
 
     def get_runtime_properties(self):
+        return [dict(key='available_gpus', value=self._available_gpu_indexes)]
+        # only Enterprise server version supports set_runtime_properties, so skip it
         if self._runtime_props_support is not True:
             # either not supported or never tested
             if self._runtime_props_support == self._session.api_version:
@@ -939,12 +943,13 @@ class Worker(ServiceCommandSection):
             res = self.get("get_runtime_properties", worker=self.worker_id)["runtime_properties"]
             # definitely supported
             self._runtime_props_support = True
-            return res
         except APIError:
             self._runtime_props_support = self._session.api_version
         return None
 
     def set_runtime_properties(self, key, value):
+        return True
+        # only Enterprise server version supports set_runtime_properties, so skip it
         if self._runtime_props_support is not True:
             # either not supported or never tested
             if self._runtime_props_support == self._session.api_version:
@@ -1056,6 +1061,7 @@ class Worker(ServiceCommandSection):
                 self.is_venv_update = False
 
         self._session.print_configuration()
+
 
     def daemon(self, queues, log_level, foreground=False, docker=False, detached=False, order_fairness=False, **kwargs):
 
@@ -1244,8 +1250,10 @@ class Worker(ServiceCommandSection):
 
         gpu_indexes = kwargs.get('gpus')
 
+        if gpu_indexes is None:
+            gpu_indexes = self._get_available_gpu_indexes()
         # test gpus were passed correctly
-        if not gpu_indexes or len(gpu_indexes.split('-')) > 2 or (',' in gpu_indexes and '-' in gpu_indexes):
+        if len(gpu_indexes.split('-')) > 2 or (',' in gpu_indexes and '-' in gpu_indexes):
             raise ValueError('--gpus must be provided, in one of two ways: '
                              'comma separated \'0,1,2,3\' or range \'0-3\'')
         try:
@@ -3147,6 +3155,23 @@ class Worker(ServiceCommandSection):
                 q_id = self._resolve_name(q if isinstance(q, str) else q.name, "queues")
             queue_ids.append(q_id)
         return queue_ids
+
+    def _get_available_gpu_indexes(self):
+        self._available_gpu_indexes = "0,1"
+        if self._available_gpu_indexes is None:
+            cmd = "nvidia-smi -x -q"
+            result = subprocess.run(shlex.split(cmd), encoding='utf-8', capture_output=True)
+            if result.returncode:
+                stdout = result.stdout[:1000] if result.stdout else ''
+                stderr = result.stderr[:1000] if result.stderr else ''
+                raise Exception(f'Failed to execute kubectl command {cmd} with result {result.returncode}\nstdout:{stdout}\nstderr:{stderr}\n')
+
+            from bs4 import BeautifulSoup
+            parser = BeautifulSoup(result.stdout)
+            gpus_count = len(parser.nvidia_smi_log.findAll('gpu'))
+            print(f"There are {gpus_count} on current machine")
+            self._available_gpu_indexes = ",".join(range(gpus_count))
+        return self._available_gpu_indexes
 
 
 if __name__ == "__main__":
