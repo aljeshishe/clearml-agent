@@ -1267,6 +1267,7 @@ class Worker(ServiceCommandSection):
                 '--dynamic_gpus must be use with '
                 'specific gpus for example "0-7" or "0,1,2,3"'.format(kwargs.get('gpus')))
 
+        self._available_gpu_indexes = ','.join(map(str, gpu_indexes))
         dynamic_gpus = []
         for s in queue_names:
             s_p = s.split('=')
@@ -3157,21 +3158,18 @@ class Worker(ServiceCommandSection):
         return queue_ids
 
     def _get_available_gpu_indexes(self):
-        self._available_gpu_indexes = "0,1"
-        if self._available_gpu_indexes is None:
-            cmd = "nvidia-smi -x -q"
-            result = subprocess.run(shlex.split(cmd), encoding='utf-8', capture_output=True)
-            if result.returncode:
-                stdout = result.stdout[:1000] if result.stdout else ''
-                stderr = result.stderr[:1000] if result.stderr else ''
-                raise Exception(f'Failed to execute kubectl command {cmd} with result {result.returncode}\nstdout:{stdout}\nstderr:{stderr}\n')
+        cmd = "nvidia-smi -x -q"
+        result = subprocess.run(shlex.split(cmd), encoding='utf-8', capture_output=True)
+        if result.returncode:
+            stdout = result.stdout[:1000] if result.stdout else ''
+            stderr = result.stderr[:1000] if result.stderr else ''
+            raise Exception(f'Failed to execute kubectl command {cmd} with result {result.returncode}\nstdout:{stdout}\nstderr:{stderr}\n')
 
-            from bs4 import BeautifulSoup
-            parser = BeautifulSoup(result.stdout)
-            gpus_count = len(parser.nvidia_smi_log.findAll('gpu'))
-            print(f"There are {gpus_count} on current machine")
-            self._available_gpu_indexes = ",".join(range(gpus_count))
-        return self._available_gpu_indexes
+        from bs4 import BeautifulSoup
+        parser = BeautifulSoup(result.stdout)
+        gpus_count = len(parser.nvidia_smi_log.findAll('gpu'))
+        print(f"There are {gpus_count} on current machine")
+        return ",".join(range(gpus_count))
 
 
 if __name__ == "__main__":
