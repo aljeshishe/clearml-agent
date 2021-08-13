@@ -3159,9 +3159,12 @@ class Worker(ServiceCommandSection):
         return queue_ids
 
     def _get_available_gpu_indexes(self):
-        return "0,1"
         cmd = "nvidia-smi -x -q"
-        result = subprocess.run(shlex.split(cmd), encoding='utf-8', capture_output=True)
+        try:
+            result = subprocess.run(shlex.split(cmd), encoding='utf-8', capture_output=True)
+        except Exception:
+            # TODO remove this debug code
+            return "0,1"
         if result.returncode:
             stdout = result.stdout[:1000] if result.stdout else ''
             stderr = result.stderr[:1000] if result.stderr else ''
