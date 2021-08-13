@@ -3166,7 +3166,7 @@ class Worker(ServiceCommandSection):
             raise Exception(f'Failed to execute kubectl command {cmd} with result {result.returncode}\nstdout:{stdout}\nstderr:{stderr}\n')
 
         from bs4 import BeautifulSoup
-        parser = BeautifulSoup(result.stdout)
+        parser = BeautifulSoup(result.stdout, 'lxml')
         gpus_count = len(parser.nvidia_smi_log.findAll('gpu'))
         print(f"There are {gpus_count} on current machine")
         return ",".join(range(gpus_count))
