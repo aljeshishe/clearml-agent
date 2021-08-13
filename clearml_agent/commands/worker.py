@@ -3168,8 +3168,8 @@ class Worker(ServiceCommandSection):
         from bs4 import BeautifulSoup
         parser = BeautifulSoup(result.stdout, 'lxml')
         gpus_count = len(parser.nvidia_smi_log.findAll('gpu'))
-        print(f"There are {gpus_count} on current machine")
-        return ",".join(range(gpus_count))
+        print(f"There are {gpus_count} GPU(s) on current machine")
+        return ",".join(map(str, range(gpus_count)))
 
 
 if __name__ == "__main__":
