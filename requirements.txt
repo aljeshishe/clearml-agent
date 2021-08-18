@@ -17,3 +17,4 @@ urllib3>=1.21.1,<1.27.0
 virtualenv>=16,<21
 beautifulsoup4==4.9.3
 lxml==4.6.3
+clearml==1.0.5
