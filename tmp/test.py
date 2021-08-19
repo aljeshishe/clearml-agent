@@ -63,5 +63,8 @@ else:
                    task4.data.completed]
 
     if sorted(sorted_times) != sorted_times:
-        print(f'Times should be in incremetned order:\n{sorted_times}')
+        print(f'Times should be in incremetned order')
+    else:
+        print(f'Times are correct')
+    print(sorted_times)
 
