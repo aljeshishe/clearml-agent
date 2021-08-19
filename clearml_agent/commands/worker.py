@@ -527,10 +527,11 @@ class Worker(ServiceCommandSection):
         except Exception:
             pass
 
-    def run_one_task(self, task_id, worker_args, docker=None):
-        # type: (Text, WorkerParams, Optional[Text]) -> ()
+    def run_one_task(self, queue, task_id, worker_args, docker=None):
+        # type: (Text, Text, WorkerParams, Optional[Text]) -> ()
         """
         Run one task pulled from queue.
+        :param queue: ID of queue that task was pulled from
         :param task_id: ID of task to run
         :param worker_args: Worker command line arguments
         :param docker: Docker image in which the execution task will run
@@ -838,7 +839,7 @@ class Worker(ServiceCommandSection):
                                level="INFO")
                 self.report_monitor(ResourceMonitor.StatusReport(queues=queues, queue=queue, task=task_id))
 
-                self.run_one_task(task_id, worker_params)
+                self.run_one_task(queue='', task_id=task_id, worker_args=worker_params)
 
                 if gpu_queues:
                     self.worker_id = dynamic_gpus_worker_id
