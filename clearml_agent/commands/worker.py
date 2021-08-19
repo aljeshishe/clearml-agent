@@ -32,6 +32,7 @@ from pathlib2 import Path
 from pyhocon import ConfigTree, ConfigFactory
 from six.moves.urllib.parse import quote
 
+from clearml.backend_api.session.client import APIClient
 from clearml_agent.backend_config.defs import UptimeConf
 from clearml_agent.helper.check_update import start_check_update_daemon
 from clearml_agent.commands.base import resolve_names, ServiceCommandSection
@@ -418,6 +419,7 @@ class Worker(ServiceCommandSection):
 
     def __init__(self, *args, **kwargs):
         super(Worker, self).__init__(*args, **kwargs)
+        self.new_api = APIClient()
         self.monitor = None
         self.log = self._session.get_logger(__name__)
         self.register_signal_handler()
@@ -525,11 +527,10 @@ class Worker(ServiceCommandSection):
         except Exception:
             pass
 
-    def run_one_task(self, queue, task_id, worker_args, docker=None):
-        # type: (Text, Text, WorkerParams, Optional[Text]) -> ()
+    def run_one_task(self, task_id, worker_args, docker=None):
+        # type: (Text, WorkerParams, Optional[Text]) -> ()
         """
         Run one task pulled from queue.
-        :param queue: ID of queue that task was pulled from
         :param task_id: ID of task to run
         :param worker_args: Worker command line arguments
         :param docker: Docker image in which the execution task will run
@@ -691,6 +692,56 @@ class Worker(ServiceCommandSection):
                     # unregister this worker, it was killed
                     self._unregister()
 
+    def _get_next_task(self, available_gpus, gpu_queues, worker_params):
+        # iterate over queues (priority style, queues[0] is highest)
+        NO_RESULT = None, None, None
+        from operator import attrgetter
+        availible_gpus_count = len(available_gpus)
+        queue_infos = self.new_api.queues.get_all(id=list(gpu_queues.keys()))
+        added_tasks = sorted([entry for queue_info in queue_infos for entry in queue_info.entries], key=attrgetter('added'))
+        if not added_tasks:
+            if self._daemon_foreground or worker_params.debug:
+                print(f"No tasks in Queues, sleeping for {self._polling_interval:.1f} seconds")
+            sleep(self._polling_interval)
+            return NO_RESULT
+
+        task_ids = list(map(attrgetter('task'), added_tasks))
+        tasks = self.new_api.tasks.get_all(id=task_ids, only_fields=['id', 'name', 'hyperparams', 'execution'])
+        tasks_dict = {task.id: task for task in tasks}
+        result = NO_RESULT
+        print(f'Availible GPUs: {availible_gpus_count}')
+        for task_id in task_ids:
+            task = tasks_dict[task_id]
+            queue_id = task.execution.queue
+            try:
+                need_gpus = int(task.hyperparams['properties']['gpus'].value)
+                print(f'Task {task.id}:{task.name} needs {need_gpus} GPUS by user property')
+            except Exception:
+                try:
+                    need_gpus = gpu_queues[queue_id][1]
+                    print(f'Task {task.id}:{task.name} needs {need_gpus} GPUS by it\'s queue')
+                except:
+                    need_gpus = 1
+                    print(f'Task {task.id}:{task.name} needs {need_gpus} GPUS by default')
+            if need_gpus > availible_gpus_count:
+                self.send_logs(task_id=task.id,
+                               lines=[f"task {task.id}:{task.name} needs {need_gpus} GPUS, but {availible_gpus_count} available\n"],
+                               level="INFO")
+            elif result is NO_RESULT:
+                result = (task.id, need_gpus, queue_id)
+                availible_gpus_count -= need_gpus
+                print(f'Going to start {task.id}:{task.name}')
+                print(f'Availible GPUs: {availible_gpus_count}')
+
+        if result is NO_RESULT:
+            if self._daemon_foreground or worker_params.debug:
+                print(f"No tasks in Queues, sleeping for {self._polling_interval:.1f} seconds")
+            sleep(self._polling_interval)
+            return NO_RESULT
+        else:
+            self.new_api.queues.remove_task(queue=result[2], task=result[0])
+            return result
+
     def run_tasks_loop(self, queues, worker_params, priority_order=True, gpu_indexes=None, gpu_queues=None):
         """
         :summary: Pull and run tasks from queues.
@@ -734,9 +785,6 @@ class Worker(ServiceCommandSection):
         list_task_gpus_ids = {}
         try:
             while True:
-                queue_tags = None
-                runtime_props = None
-
                 if max_num_instances and max_num_instances > 0:
                     # make sure we do not have too many instances to run
                     if len(Singleton.get_running_pids()) >= max_num_instances:
@@ -747,119 +795,55 @@ class Worker(ServiceCommandSection):
                         continue
 
                 # update available gpus
-                if gpu_queues:
-                    available_gpus = self._dynamic_gpu_get_available(gpu_indexes)
-                    # if something went wrong or we have no free gpus
-                    # start over from the highest priority queue
-                    if not available_gpus:
-                        if self._daemon_foreground or worker_params.debug:
-                            print("All GPUs allocated, sleeping for {:.1f} seconds".format(self._polling_interval))
-                        sleep(self._polling_interval)
-                        continue
+                available_gpus = self._dynamic_gpu_get_available(gpu_indexes)
+                # if something went wrong or we have no free gpus
+                # start over from the highest priority queue
 
-                # iterate over queues (priority style, queues[0] is highest)
-                for queue in queues:
-
-                    if queue_tags is None or runtime_props is None:
-                        queue_tags, runtime_props = self.get_worker_properties(queues)
-
-                    if not self.should_be_currently_active(queue_tags[queue], runtime_props):
-                        continue
-
-                    if gpu_queues:
-                        # peek into queue
-                        # get next task in queue
-                        try:
-                            response = self._session.send_api(queues_api.GetByIdRequest(queue=queue))
-                        except Exception:
-                            # if something went wrong start over from the highest priority queue
-                            break
-                        if not len(response.queue.entries):
-                            continue
-                        # check if we do not have enough available gpus
-                        if gpu_queues[queue][0] > len(available_gpus):
-                            # not enough available_gpus, we should sleep and start over
-                            if self._daemon_foreground or worker_params.debug:
-                                print("Not enough free GPUs {}/{}, sleeping for {:.1f} seconds".format(
-                                    len(available_gpus), gpu_queues[queue][0], self._polling_interval))
-                            sleep(self._polling_interval)
-                            break
-
-                    # get next task in queue
+                task_id, need_gpus, queue = self._get_next_task(available_gpus=available_gpus, gpu_queues=gpu_queues,
+                                                                worker_params=worker_params)
+                if task_id is None:
+                    continue
+                # clear output log if we start a new Task
+                if not worker_params.debug and self._redirected_stdout_file_no is not None and \
+                    self._redirected_stdout_file_no > 2:
+                    # noinspection PyBroadException
                     try:
-                        response = self._session.send_api(
-                            queues_api.GetNextTaskRequest(queue=queue)
-                        )
-                    except Exception as e:
-                        print(
-                            "Warning: Could not access task queue [{}], error: {}".format(
-                                queue, e
-                            )
-                        )
-                        continue
-                    else:
-                        try:
-                            task_id = response.entry.task
-                        except AttributeError:
-                            if self._daemon_foreground or worker_params.debug:
-                                print("No tasks in queue {}".format(queue))
-                            continue
+                        os.lseek(self._redirected_stdout_file_no, 0, 0)
+                        os.ftruncate(self._redirected_stdout_file_no, 0)
+                    except:
+                        pass
 
-                        # clear output log if we start a new Task
-                        if not worker_params.debug and self._redirected_stdout_file_no is not None and \
-                                self._redirected_stdout_file_no > 2:
-                            # noinspection PyBroadException
-                            try:
-                                os.lseek(self._redirected_stdout_file_no, 0, 0)
-                                os.ftruncate(self._redirected_stdout_file_no, 0)
-                            except:
-                                pass
+                self.send_logs(task_id=task_id,
+                               lines=[f"task {task_id} pulled from {queue} by worker {self.worker_id}\n"],
+                               level="INFO")
+                self.report_monitor(ResourceMonitor.StatusReport(queues=queues, queue=queue, task=task_id))
 
-                        self.report_monitor(ResourceMonitor.StatusReport(queues=queues, queue=queue, task=task_id))
+                org_gpus = os.environ.get('NVIDIA_VISIBLE_DEVICES')
+                dynamic_gpus_worker_id = self.worker_id
+                # the following is only executed in dynamic gpus mode
 
-                        org_gpus = os.environ.get('NVIDIA_VISIBLE_DEVICES')
-                        dynamic_gpus_worker_id = self.worker_id
-                        # the following is only executed in dynamic gpus mode
-                        if gpu_queues and gpu_queues.get(queue):
-                            # pick the first available GPUs
-                            # gpu_queues[queue] = (min_gpus, max_gpus)
-                            # get as many gpus as possible with max_gpus as limit, the min is covered before
-                            gpus = available_gpus[:gpu_queues.get(queue)[1]]
-                            available_gpus = available_gpus[gpu_queues.get(queue)[1]:]
-                            self.set_runtime_properties(
-                                key='available_gpus', value=','.join(str(g) for g in available_gpus))
-                            os.environ['CUDA_VISIBLE_DEVICES'] = \
-                                os.environ['NVIDIA_VISIBLE_DEVICES'] = ','.join(str(g) for g in gpus)
-                            list_task_gpus_ids.update({str(g): task_id for g in gpus})
-                            self.worker_id = ':'.join(self.worker_id.split(':')[:-1] + ['gpu'+','.join(str(g) for g in gpus)])
-
-                        self.send_logs(
-                            task_id=task_id,
-                            lines=["task {} pulled from {} by worker {}\n".format(task_id, queue, self.worker_id)],
-                            level="INFO",
-                        )
-
-                        self.run_one_task(queue, task_id, worker_params)
-
-                        if gpu_queues:
-                            self.worker_id = dynamic_gpus_worker_id
-                            os.environ['CUDA_VISIBLE_DEVICES'] = \
-                                os.environ['NVIDIA_VISIBLE_DEVICES'] = org_gpus
-
-                        self.report_monitor(ResourceMonitor.StatusReport(queues=self.queues))
-
-                        queue_tags = None
-                        runtime_props = None
-
-                        # if we are using priority start pulling from the first always,
-                        # if we are doing round robin, pull from the next one
-                        if priority_order:
-                            break
+                # pick the first available GPUs
+                # gpu_queues[queue] = (min_gpus, max_gpus)
+                # get as many gpus as possible with max_gpus as limit, the min is covered before
+                if need_gpus:
+                    gpus = available_gpus[:need_gpus]
+                    available_gpus = available_gpus[need_gpus:]
+                    os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['NVIDIA_VISIBLE_DEVICES'] = ','.join(
+                        str(g) for g in gpus)
+                    list_task_gpus_ids.update({str(g): task_id for g in gpus})
+                    self.worker_id = ':'.join(self.worker_id.split(':')[:-1] + ['gpu' + ','.join(str(g) for g in gpus)])
                 else:
-                    # sleep and retry polling
-                    if self._daemon_foreground or worker_params.debug:
-                        print("No tasks in Queues, sleeping for {:.1f} seconds".format(self._polling_interval))
-                    sleep(self._polling_interval)
+                    os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['NVIDIA_VISIBLE_DEVICES'] = 'none'
+                    list_task_gpus_ids[None] = task_id
+                    self.worker_id = ':'.join(self.worker_id.split(':')[:-1] + ['cpu'])
+
+                self.run_one_task(task_id, worker_params)
+
+                if gpu_queues:
+                    self.worker_id = dynamic_gpus_worker_id
+                    os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['NVIDIA_VISIBLE_DEVICES'] = org_gpus
+
+                self.report_monitor(ResourceMonitor.StatusReport(queues=self.queues))
 
                 if self._session.config["agent.reload_config"]:
                     self.reload_config()
@@ -3162,9 +3146,9 @@ class Worker(ServiceCommandSection):
         cmd = "nvidia-smi -x -q"
         try:
             result = subprocess.run(shlex.split(cmd), encoding='utf-8', capture_output=True)
-        except Exception:
-            # TODO remove this debug code
-            return "0,1"
+        except FileNotFoundError as ex:
+            print(f'Can\'t get GPUs due to exception: {ex}. Running without GPUs')
+            return ""
         if result.returncode:
             stdout = result.stdout[:1000] if result.stdout else ''
             stderr = result.stderr[:1000] if result.stderr else ''
