@@ -813,10 +813,6 @@ class Worker(ServiceCommandSection):
                     except:
                         pass
 
-                self.send_logs(task_id=task_id,
-                               lines=[f"task {task_id} pulled from {queue} by worker {self.worker_id}\n"],
-                               level="INFO")
-                self.report_monitor(ResourceMonitor.StatusReport(queues=queues, queue=queue, task=task_id))
 
                 org_gpus = os.environ.get('NVIDIA_VISIBLE_DEVICES')
                 dynamic_gpus_worker_id = self.worker_id
@@ -836,6 +832,11 @@ class Worker(ServiceCommandSection):
                     os.environ['CUDA_VISIBLE_DEVICES'] = os.environ['NVIDIA_VISIBLE_DEVICES'] = 'none'
                     list_task_gpus_ids[None] = task_id
                     self.worker_id = ':'.join(self.worker_id.split(':')[:-1] + ['cpu'])
+
+                self.send_logs(task_id=task_id,
+                               lines=[f"task {task_id} pulled from {queue} by worker {self.worker_id}\n"],
+                               level="INFO")
+                self.report_monitor(ResourceMonitor.StatusReport(queues=queues, queue=queue, task=task_id))
 
                 self.run_one_task(task_id, worker_params)
 
