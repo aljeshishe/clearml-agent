@@ -714,6 +714,7 @@ class Worker(ServiceCommandSection):
         for task_id in task_ids:
             task = tasks_dict[task_id]
             queue_id = task.execution.queue
+            # checking gpus
             try:
                 need_gpus = int(task.hyperparams['properties']['gpus'].value)
                 print(f'Task {task.id}:{task.name} needs {need_gpus} GPUS by user property')
@@ -724,6 +725,19 @@ class Worker(ServiceCommandSection):
                 except:
                     need_gpus = 1
                     print(f'Task {task.id}:{task.name} needs {need_gpus} GPUS by default')
+            # checking worker_pattern
+            try:
+                worker_pattern = task.hyperparams['properties']['worker_pattern'].value
+                if worker_pattern not in self.worker_id:
+                    message = f"task {task.id}:{task.name} needs worker with pattern {worker_pattern} " \
+                              f"but current worker {self.worker_id} does not contain it\n"
+                    self.send_logs(task_id=task.id,
+                                   lines=[message],
+                                   level="INFO")
+                    return NO_RESULT
+            except KeyError:
+                pass
+
             if need_gpus > availible_gpus_count:
                 self.send_logs(task_id=task.id,
                                lines=[f"task {task.id}:{task.name} needs {need_gpus} GPUS, but {availible_gpus_count} available\n"],
@@ -1219,7 +1233,7 @@ class Worker(ServiceCommandSection):
                                 name, tb
                             )
                         )
-                    sleep(1)
+                    sleep(5)
         finally:
             self._unregister(queues)
             safe_remove_file(self.temp_config_path)
